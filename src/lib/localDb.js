@@ -19,25 +19,30 @@ function getUserDataDir() {
 
   if (process.env.DATA_DIR) return process.env.DATA_DIR;
 
-  const platform = process.platform;
-  const homeDir = os.homedir();
-  const appName = getAppName();
-
-  if (platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(homeDir, "AppData", "Roaming"), appName);
-  } else {
-    // macOS & Linux: ~/.{appName}
-    return path.join(homeDir, `.${appName}`);
-  }
+  // Use ./db directory in project root (works on all platforms)
+  const projectRoot = process.cwd();
+  return path.join(projectRoot, "/data");
 }
 
-// Data file path - stored in user home directory
+// Data file path - stored in project db directory
 const DATA_DIR = getUserDataDir();
 const DB_FILE = isCloud ? null : path.join(DATA_DIR, "db.json");
 
-// Ensure data directory exists
-if (!isCloud && !fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+// Ensure data directory exists with better error handling
+if (!isCloud) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      console.log(`[DB] Creating data directory: ${DATA_DIR}`);
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      console.log(`[DB] Data directory created successfully`);
+    } else {
+      console.log(`[DB] Data directory exists: ${DATA_DIR}`);
+    }
+    console.log(`[DB] Database file path: ${DB_FILE}`);
+  } catch (error) {
+    console.error(`[DB] Failed to create data directory: ${error.message}`);
+    console.error(`[DB] Error details:`, error);
+  }
 }
 
 // Default data structure
@@ -183,12 +188,24 @@ async function safeRead(db) {
 
   let release = null;
   try {
+    // Check if file exists before trying to lock
+    if (!fs.existsSync(DB_FILE)) {
+      // File doesn't exist, throw ENOENT to trigger initialization
+      const error = new Error(`ENOENT: no such file or directory, open '${DB_FILE}'`);
+      error.code = 'ENOENT';
+      throw error;
+    }
+    
     // Acquire lock before reading
     release = await lockfile.lock(DB_FILE, LOCK_OPTIONS);
     await db.read();
   } catch (error) {
     if (error.code === "ELOCKED") {
       console.warn("[DB] File is locked, retrying read...");
+      throw error;
+    }
+    if (error.code === "ENOENT") {
+      // Re-throw ENOENT to be handled by getDb()
       throw error;
     }
     throw error;
@@ -248,7 +265,26 @@ export async function getDb() {
     return dbInstance;
   }
 
+  // Ensure directory exists before creating DB instance
+  if (!fs.existsSync(DATA_DIR)) {
+    console.log(`[DB] Creating data directory in getDb(): ${DATA_DIR}`);
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+
+  // Ensure db.json file exists before initializing lowdb
+  if (!fs.existsSync(DB_FILE)) {
+    console.log(`[DB] Creating initial database file: ${DB_FILE}`);
+    try {
+      fs.writeFileSync(DB_FILE, JSON.stringify(cloneDefaultData(), null, 2), 'utf8');
+      console.log(`[DB] Database file created successfully`);
+    } catch (error) {
+      console.error(`[DB] Failed to create database file:`, error);
+      throw error;
+    }
+  }
+
   if (!dbInstance) {
+    console.log(`[DB] Initializing database instance: ${DB_FILE}`);
     const adapter = new JSONFile(DB_FILE);
     dbInstance = new Low(adapter, cloneDefaultData());
   }
@@ -256,18 +292,27 @@ export async function getDb() {
   // Always read latest disk state to avoid stale singleton data across route workers.
   try {
     await safeRead(dbInstance);
+    console.log(`[DB] Database read successfully`);
   } catch (error) {
-    if (error instanceof SyntaxError) {
+    if (error.code === 'ENOENT') {
+      // File doesn't exist yet, initialize with defaults
+      console.log('[DB] Database file not found, creating new one...');
+      dbInstance.data = cloneDefaultData();
+      await safeWrite(dbInstance);
+      console.log('[DB] Database file created successfully');
+    } else if (error instanceof SyntaxError) {
       console.warn('[DB] Corrupt JSON detected, resetting to defaults...');
       dbInstance.data = cloneDefaultData();
       await safeWrite(dbInstance);
     } else {
+      console.error('[DB] Error reading database:', error);
       throw error;
     }
   }
 
   // Initialize/migrate missing keys for older DB schema versions.
   if (!dbInstance.data) {
+    console.log('[DB] No data found, initializing with defaults...');
     dbInstance.data = cloneDefaultData();
     await safeWrite(dbInstance);
   } else {

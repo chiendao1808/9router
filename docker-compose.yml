@@ -1,0 +1,57 @@
+services:
+  9router:
+    # ── Build options ────────────────────────────────────────────────
+    # Option A (default): build từ Dockerfile trong cùng thư mục
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   target: runtime          # dùng stage "runtime" (multi-stage)
+
+    # Option B: pull image đã build sẵn (bỏ comment nếu dùng)
+    image: leopepe2012/9router:latest
+
+    container_name: 9router
+    user: root
+    # ── Port mapping ──────────────────────────────────────────────────
+    ports:
+      - "20128:20128"   # thay đổi qua .env nếu cần
+    volumes:
+      - 9router_data:/app/data
+
+    # ── Environment ───────────────────────────────────────────────────
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+
+    # ── Restart policy ────────────────────────────────────────────────
+    restart: unless-stopped
+    networks:
+      - 9router_network
+
+    # ── Health check ──────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:20128/dashboard"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # ── Logging ───────────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ── Named volume ──────────────────────────────────────────────────────
+volumes:
+  9router_data:
+    name: 9router_data
+    driver: local
+
+# ── Network (optional — dùng nếu muốn isolate) ────────────────────────
+networks:
+  9router_network:
+    name: 9router_network
+    driver: bridge
